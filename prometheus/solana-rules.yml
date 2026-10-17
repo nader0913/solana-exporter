@@ -20,3 +20,7 @@ groups:
       - record: solana:validator_day_skip_rate
         expr: |-
           sum by (hostname, nodekey) (increase(solana_validator_leader_slots_total{app="solana",status="skipped"}[1d])) / sum by (hostname, nodekey) (increase(solana_validator_leader_slots_total{app="solana"}[1d]))
+      # Current-epoch vote credits as a fraction of the best validator in the cluster (1.0 = on par with the best).
+      - record: solana:validator_epoch_credits_ratio
+        expr: |-
+          solana_validator_epoch_credits{app="solana"} / on (hostname) group_left solana_cluster_max_epoch_credits{app="solana"}

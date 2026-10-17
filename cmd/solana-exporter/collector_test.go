@@ -47,15 +47,23 @@ func NewSimulator(t *testing.T, slot int) (*Simulator, *rpc.Client) {
 	// "ccc" deliberately has no BLS pubkey set:
 	blsPubkeys := []string{"blsAAA", "blsBBB", ""}
 	feeRewardLamports, inflationRewardLamports := 10, 10
+	// epochCredits history as [epoch, credits, previousCredits]: "ccc" deliberately has no entry for epoch 1, as if
+	// it had stopped voting before the epoch started:
+	epochCredits := [][]rpc.EpochCredit{
+		{{Epoch: 0, Credits: 100, PreviousCredits: 0}, {Epoch: 1, Credits: 160, PreviousCredits: 100}},
+		{{Epoch: 0, Credits: 100, PreviousCredits: 0}, {Epoch: 1, Credits: 150, PreviousCredits: 100}},
+		{{Epoch: 0, Credits: 100, PreviousCredits: 0}},
+	}
 
 	validatorInfos := make(map[string]rpc.MockValidatorInfo)
 	for i, nodekey := range nodekeys {
 		validatorInfos[nodekey] = rpc.MockValidatorInfo{
-			Votekey:    votekeys[i],
-			Stake:      1_000_000,
-			Delinquent: false,
-			Commission: 11,
-			BlsPubkey:  blsPubkeys[i],
+			Votekey:      votekeys[i],
+			Stake:        1_000_000,
+			Delinquent:   false,
+			Commission:   11,
+			BlsPubkey:    blsPubkeys[i],
+			EpochCredits: epochCredits[i],
 		}
 	}
 	leaderSchedule := map[string][]int{
@@ -316,9 +324,57 @@ func TestSolanaCollector(t *testing.T) {
 			NewLV(1, "bbb", "BBB"),
 			NewLV(0, "ccc", "CCC"),
 		),
+		// slot 35 is in epoch 1 (epoch size 24):
+		collector.ValidatorEpochCredits.makeCollectionTest(
+			NewLV(60, "aaa", "AAA"),
+			NewLV(50, "bbb", "BBB"),
+			NewLV(0, "ccc", "CCC"),
+		),
+		collector.ClusterMaxEpochCredits.makeCollectionTest(
+			NewLV(60),
+		),
 	}
 
 	runCollectionTests(t, collector, testCases)
+}
+
+// TestSolanaCollector_collectVoteAccounts_epochCredits checks that vote credits are read from the epochCredits entry
+// matching the current epoch, so that stale history (a validator whose latest entry is for an older epoch) reports 0
+// and the cluster maximum ignores it, and that an epoch-info failure only invalidates the credit metrics.
+func TestSolanaCollector_collectVoteAccounts_epochCredits(t *testing.T) {
+	t.Run("epoch 0", func(t *testing.T) {
+		simulator, client := NewSimulator(t, 0)
+		collector := NewSolanaCollector(client, newTestConfig(simulator, false))
+		prometheus.NewPedanticRegistry().MustRegister(collector)
+
+		runCollectionTests(t, collector, []collectionTest{
+			collector.ValidatorEpochCredits.makeCollectionTest(
+				NewLV(100, "aaa", "AAA"),
+				NewLV(100, "bbb", "BBB"),
+				NewLV(100, "ccc", "CCC"),
+			),
+			collector.ClusterMaxEpochCredits.makeCollectionTest(NewLV(100)),
+		})
+	})
+
+	t.Run("epoch info unavailable", func(t *testing.T) {
+		simulator, client := NewSimulator(t, 35)
+		simulator.Server.SetOpt(rpc.EasyErrorsOpt, "getEpochInfo", rpc.Error{
+			Code: -32000, Method: "getEpochInfo", Message: "simulated failure",
+		})
+		collector := NewSolanaCollector(client, newTestConfig(simulator, false))
+
+		var invalid, valid int
+		for _, m := range collectToSlice(collector.collectVoteAccounts) {
+			if m.Write(&dto.Metric{}) != nil {
+				invalid++
+			} else {
+				valid++
+			}
+		}
+		assert.Equal(t, 2, invalid, "expected exactly the two credit metrics to be invalid")
+		assert.NotZero(t, valid, "expected the remaining vote account metrics to still be collected")
+	})
 }
 
 func TestSolanaCollector_collectHealth(t *testing.T) {
@@ -460,6 +516,8 @@ func TestSolanaCollector_LightMode(t *testing.T) {
 			collector.ValidatorActiveStake,
 			collector.ClusterActiveStake,
 			collector.ValidatorDelinquent,
+			collector.ValidatorEpochCredits,
+			collector.ClusterMaxEpochCredits,
 			collector.AccountBalances,
 			collector.NodeMinimumLedgerSlot,
 			collector.NodeFirstAvailableBlock,

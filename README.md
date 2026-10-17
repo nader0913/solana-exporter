@@ -145,6 +145,8 @@ The tables below describes all the metrics collected by the `solana-exporter`:
 | `solana_validator_delinquent`                  | Whether a validator is delinquent.                                                                                    | `votekey`, `nodekey`          |
 | `solana_validator_commission`                  | Validator commission, as a percentage.                                                                                | `votekey`, `nodekey`          |
 | `solana_validator_bls_pubkey_set`              | Whether the validator's vote account has a BLS pubkey set (SIMD-0387).                                                | `votekey`, `nodekey`          |
+| `solana_validator_epoch_credits`               | Vote credits earned so far in the current epoch per validator.                                                        | `votekey`, `nodekey`          |
+| `solana_cluster_max_epoch_credits`             | Highest number of vote credits earned so far in the current epoch by any validator in the cluster.                   | N/A                           |
 | `solana_cluster_validator_count`               | Total number of validators in the cluster.                                                                            | `state`                       |
 | `solana_account_balance`                       | Solana account balances.                                                                                              | `address`                     |
 | `solana_node_version`                          | Node version of solana.                                                                                               | `version`                     |
@@ -174,10 +176,20 @@ The following metrics are all received from the `getVoteAccounts` [RPC endpoint]
 * `solana_validator_root_slot`
 * `solana_validator_delinquent`
 * `solana_validator_commission`
+* `solana_validator_epoch_credits`
 
 ***NOTE***: If `-comprehensive-vote-account-tracking` is configured, then these metrics are tracked for **all** network
 validators. Regardless of comprehensive tracking, the above metrics' cluster counterparts are always tracked for easy 
 cluster-level comparison.
+
+`solana_validator_epoch_credits` is read from the `epochCredits` history in the `getVoteAccounts` response, using the
+entry whose epoch matches the current epoch (from `getEpochInfo`). With
+[timely vote credits](https://www.anza.xyz/blog/feature-gate-spotlight-timely-vote-credits), each rooted vote earns
+between 1 and 16 credits depending on its latency, so the maximum achievable per epoch is `16 * slotsInEpoch`.
+A validator with no `epochCredits` entry for the current epoch (e.g., delinquent since before the epoch started)
+reports `0`. The cluster-wide maximum (`solana_cluster_max_epoch_credits`) is always tracked, so that a validator's
+credits can be compared against the best-performing validator in the same epoch (see the example
+[recording rules](prometheus/solana-rules.yml)).
 
 `solana_validator_bls_pubkey_set` is the exception: the BLS pubkey is not part of the `getVoteAccounts` response, so it
 is read from the parsed vote account data via the `getMultipleAccounts`
