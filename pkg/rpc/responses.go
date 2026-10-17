@@ -45,12 +45,25 @@ type (
 
 	// VoteAccount holds stake and voting metadata for a single validator vote account.
 	VoteAccount struct {
-		ActivatedStake int64  `json:"activatedStake"`
-		LastVote       int    `json:"lastVote"`
-		NodePubkey     string `json:"nodePubkey"`
-		RootSlot       int    `json:"rootSlot"`
-		VotePubkey     string `json:"votePubkey"`
-		Commission     int64  `json:"commission"`
+		ActivatedStake int64         `json:"activatedStake"`
+		LastVote       int           `json:"lastVote"`
+		NodePubkey     string        `json:"nodePubkey"`
+		RootSlot       int           `json:"rootSlot"`
+		VotePubkey     string        `json:"votePubkey"`
+		Commission     int64         `json:"commission"`
+		EpochCredits   []EpochCredit `json:"epochCredits"`
+	}
+
+	// EpochCredit is one [epoch, credits, previousCredits] entry of a vote account's epochCredits history, as
+	// reported by getVoteAccounts (the node returns at most the 5 most recent epochs). Credits is the cumulative
+	// credit count at the end of Epoch (or so far, for the current epoch) and PreviousCredits the cumulative count
+	// at the end of the epoch before it, so Credits - PreviousCredits is the amount earned in Epoch.
+	EpochCredit struct {
+		// Epoch is a u64: when a vote account migrates to Alpenglow, agave appends a marker entry
+		// (AG_MIGRATION_EPOCH_CREDIT) whose fields are all u64::MAX.
+		Epoch           uint64
+		Credits         uint64
+		PreviousCredits uint64
 	}
 
 	// VoteAccounts groups current and delinquent vote accounts, as returned by getVoteAccounts.
@@ -144,4 +157,45 @@ func (hp *HostProduction) UnmarshalJSON(data []byte) error {
 	hp.LeaderSlots = arr[0]
 	hp.BlocksProduced = arr[1]
 	return nil
+}
+
+// epochCreditFields is the length of an epochCredits entry: [epoch, credits, previousCredits].
+const epochCreditFields = 3
+
+// UnmarshalJSON decodes the [epoch, credits, previousCredits] array form into an EpochCredit.
+func (ec *EpochCredit) UnmarshalJSON(data []byte) error {
+	var arr []uint64
+	if err := json.Unmarshal(data, &arr); err != nil {
+		return err
+	}
+
+	if len(arr) != epochCreditFields {
+		return fmt.Errorf("expected array of %d integers, got %d", epochCreditFields, len(arr))
+	}
+	ec.Epoch, ec.Credits, ec.PreviousCredits = arr[0], arr[1], arr[2]
+	return nil
+}
+
+// MarshalJSON encodes an EpochCredit back into its [epoch, credits, previousCredits] array form.
+func (ec EpochCredit) MarshalJSON() ([]byte, error) {
+	return json.Marshal([]uint64{ec.Epoch, ec.Credits, ec.PreviousCredits})
+}
+
+// CreditsInEpoch returns the number of vote credits the account earned in the given epoch, or 0 if its epochCredits
+// history has no entry for that epoch (e.g. the validator has been delinquent since before the epoch started, or
+// the node only reported older epochs).
+func (va *VoteAccount) CreditsInEpoch(epoch int64) uint64 {
+	if epoch < 0 {
+		return 0
+	}
+	for _, entry := range va.EpochCredits {
+		if entry.Epoch == uint64(epoch) {
+			if entry.Credits < entry.PreviousCredits {
+				// should never happen on a healthy node; avoid a uint64 underflow reporting ~1.8e19 credits
+				return 0
+			}
+			return entry.Credits - entry.PreviousCredits
+		}
+	}
+	return 0
 }

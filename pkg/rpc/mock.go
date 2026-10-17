@@ -53,13 +53,14 @@ type (
 	}
 
 	MockValidatorInfo struct {
-		Votekey    string
-		Stake      int
-		LastVote   int
-		Delinquent bool
-		RootSlot   int
-		Commission int64
-		BlsPubkey  string
+		Votekey      string
+		Stake        int
+		LastVote     int
+		Delinquent   bool
+		RootSlot     int
+		Commission   int64
+		BlsPubkey    string
+		EpochCredits []EpochCredit
 	}
 )
 
@@ -286,6 +287,7 @@ func (s *MockServer) getResult(method string, params ...any) (any, *Error) {
 				"rootSlot":       info.RootSlot,
 				"votePubkey":     info.Votekey,
 				"commission":     info.Commission,
+				"epochCredits":   info.EpochCredits,
 			}
 			if info.Delinquent {
 				delinquentVoteAccounts = append(delinquentVoteAccounts, voteAccount)

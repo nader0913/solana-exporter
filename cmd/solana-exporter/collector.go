@@ -58,6 +58,8 @@ type SolanaCollector struct {
 	NodeIsActive            *GaugeDesc
 	ValidatorCommission     *GaugeDesc
 	ValidatorBlsPubkeySet   *GaugeDesc
+	ValidatorEpochCredits   *GaugeDesc
+	ClusterMaxEpochCredits  *GaugeDesc
 }
 
 func NewSolanaCollector(rpcClient *rpc.Client, config *ExporterConfig) *SolanaCollector {
@@ -154,6 +156,18 @@ func NewSolanaCollector(rpcClient *rpc.Client, config *ExporterConfig) *SolanaCo
 			),
 			VotekeyLabel, NodekeyLabel,
 		),
+		ValidatorEpochCredits: NewGaugeDesc(
+			"solana_validator_epoch_credits",
+			fmt.Sprintf(
+				"Vote credits earned so far in the current epoch per validator (represented by %s and %s)",
+				VotekeyLabel, NodekeyLabel,
+			),
+			VotekeyLabel, NodekeyLabel,
+		),
+		ClusterMaxEpochCredits: NewGaugeDesc(
+			"solana_cluster_max_epoch_credits",
+			"Highest number of vote credits earned so far in the current epoch by any validator in the cluster",
+		),
 	}
 	return collector
 }
@@ -177,6 +191,8 @@ func (c *SolanaCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.NodeIsActive.Desc
 	ch <- c.ValidatorCommission.Desc
 	ch <- c.ValidatorBlsPubkeySet.Desc
+	ch <- c.ValidatorEpochCredits.Desc
+	ch <- c.ClusterMaxEpochCredits.Desc
 }
 
 func (c *SolanaCollector) collectVoteAccounts(ctx context.Context, ch chan<- prometheus.Metric) {
@@ -197,13 +213,25 @@ func (c *SolanaCollector) collectVoteAccounts(ctx context.Context, ch chan<- pro
 		ch <- c.ValidatorDelinquent.NewInvalidMetric(err)
 		ch <- c.ClusterValidatorCount.NewInvalidMetric(err)
 		ch <- c.ValidatorCommission.NewInvalidMetric(err)
+		ch <- c.ValidatorEpochCredits.NewInvalidMetric(err)
+		ch <- c.ClusterMaxEpochCredits.NewInvalidMetric(err)
 		return
 	}
 
+	// The epochCredits history reported by getVoteAccounts is only keyed by epoch, so the current epoch is needed to
+	// pick the right entry: a validator that has been delinquent since before the epoch started has no entry for it.
+	epochInfo, epochErr := c.rpcClient.GetEpochInfo(ctx, rpc.CommitmentConfirmed)
+	if epochErr != nil {
+		c.logger.Errorf("failed to get epoch info, skipping vote credits: %v", epochErr)
+		ch <- c.ValidatorEpochCredits.NewInvalidMetric(epochErr)
+		ch <- c.ClusterMaxEpochCredits.NewInvalidMetric(epochErr)
+	}
+
 	var (
-		totalStake  float64
-		maxLastVote float64
-		maxRootSlot float64
+		totalStake      float64
+		maxLastVote     float64
+		maxRootSlot     float64
+		maxEpochCredits float64
 	)
 	for _, account := range append(voteAccounts.Current, voteAccounts.Delinquent...) {
 		accounts := []string{account.VotePubkey, account.NodePubkey}
@@ -212,16 +240,25 @@ func (c *SolanaCollector) collectVoteAccounts(ctx context.Context, ch chan<- pro
 			float64(account.RootSlot),
 			float64(account.Commission)
 
+		var epochCredits float64
+		if epochErr == nil {
+			epochCredits = float64(account.CreditsInEpoch(epochInfo.Epoch))
+		}
+
 		if slices.Contains(c.config.Nodekeys, account.NodePubkey) || c.config.ComprehensiveVoteAccountTracking {
 			ch <- c.ValidatorActiveStake.MustNewConstMetric(stake, accounts...)
 			ch <- c.ValidatorLastVote.MustNewConstMetric(lastVote, accounts...)
 			ch <- c.ValidatorRootSlot.MustNewConstMetric(rootSlot, accounts...)
 			ch <- c.ValidatorCommission.MustNewConstMetric(commission, accounts...)
+			if epochErr == nil {
+				ch <- c.ValidatorEpochCredits.MustNewConstMetric(epochCredits, accounts...)
+			}
 		}
 
 		totalStake += stake
 		maxLastVote = max(maxLastVote, lastVote)
 		maxRootSlot = max(maxRootSlot, rootSlot)
+		maxEpochCredits = max(maxEpochCredits, epochCredits)
 	}
 
 	{
@@ -240,6 +277,9 @@ func (c *SolanaCollector) collectVoteAccounts(ctx context.Context, ch chan<- pro
 	ch <- c.ClusterActiveStake.MustNewConstMetric(totalStake)
 	ch <- c.ClusterLastVote.MustNewConstMetric(maxLastVote)
 	ch <- c.ClusterRootSlot.MustNewConstMetric(maxRootSlot)
+	if epochErr == nil {
+		ch <- c.ClusterMaxEpochCredits.MustNewConstMetric(maxEpochCredits)
+	}
 	ch <- c.ClusterValidatorCount.MustNewConstMetric(float64(len(voteAccounts.Current)), StateCurrent)
 	ch <- c.ClusterValidatorCount.MustNewConstMetric(float64(len(voteAccounts.Delinquent)), StateDelinquent)
 
